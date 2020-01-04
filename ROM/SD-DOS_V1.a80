@@ -1,0 +1,1248 @@
+;*************************************
+; SD DOS for DAI V 1.0
+; P. Durant - 2019
+;*************************************
+            .ORG    $F000 
+OUTC        EQU     $DD60 
+CRLF        EQU     $DD5E 
+FGETC       EQU     $D6BB 
+WSPACE      EQU     $D6DA 
+ADDEB       EQU     $02EC 
+ADFIN       EQU     $BFFF 
+;*************************************
+            JMP     INIT 
+            JMP     REMS ; REMS = Execute Command after a REM
+            JMP     ONERR ; Initialize ON ERROR
+            JMP     NONERR ; Dessactivate ON ERROR and back to normal management under BAsic
+            JMP     SDC ; Select SD Card Reader
+            JMP     TAP ; Select Tape
+            JMP     CLS ; Command Clear Display
+; 
+;*************************************
+;* ROUTINE REMS: Execute a command
+;* after a REM in a program
+;*************************************
+;* Entry:   DE:
+;* Exit:    DEHL:
+;*************************************
+REMS:       PUSH    PSW 
+            PUSH    B 
+            PUSH    D 
+            PUSH    H 
+            LXI     H,$A 
+            DAD     SP 
+            SHLD    $299 
+            LDAX    B 
+            CPI     $A9 ; Basic Code for the command REM
+            JNZ     $C14D ; Do a POP H, D, B, PSW and RET
+            INX     B 
+            LDAX    B 
+            INR     A 
+            STA     $134 
+            MOV     H,B 
+            MOV     L,C 
+            SHLD    $132 
+            MVI     A,$1 
+            STA     $135 
+            MOV     C,A 
+            CALL    FINST ; Find an instruction
+            XRA     A 
+            STA     $135 
+            STA     $29A 
+            DCR     C 
+            JZ      $DA0B ; Entry Error Routine: sytntax error
+            JMP     $C14D ; Do a POP H, D, B and RET
+; 
+;*************************************
+;* ROUTINE DINC: Replace DINC routine
+;* extend interpreter for command
+;*************************************
+;* Entry:   DE:
+;* Exit:    DEHL:
+;*************************************
+DINC:       PUSH    H 
+            LXI     H,$117 
+            MOV     A,M 
+            INX     H 
+            ORA     M 
+            MOV     L,A 
+            LDA     $131 ; OTWS (Output Switching)
+            ANI     $FE 
+            ORA     L 
+            POP     H 
+            JNZ     LBL2 
+            CALL    LBL2 
+            PUSH    PSW 
+            CPI     $D ; if "CR"
+            JZ      LBL3 ; jump to LBL3
+            CPI     $9 ; if not "TAB"
+            JNZ     LBL1 ; jump to LBL1
+            MVI     A,$C 
+            CALL    $D695 ; Ouput One Character
+            MVI     A,$2A 
+            CALL    $D695 ; Ouput One Character
+LBL1:       POP     PSW 
+            RET      
+; 
+LBL2:       LDA     $296 
+            ANI     $1 
+            JZ      $D1E2 ; Keyboard scanning
+            JMP     $2E3 ; Vector Table (initial: RET 00 00)
+; Interpret & execution in DIRECT mMode
+LBL3:       DCR     M 
+            POP     PSW 
+            LXI     H,$C88F ; Command RETURN in Basic Mode
+            XTHL     
+            LXI     H,$0 
+            DAD     SP 
+            SHLD    $299 
+            MVI     C,$1 
+            PUSH    D 
+            CALL    FINST ; Find an instruction and execute it
+            POP     D 
+            POP     H 
+            XRA     A 
+            STA     $29A 
+            JMP     $DD45 ; exit 1 in input line
+; Find an INstruction and execute it
+FINST:      LHLD    $297 
+LBL4:       MVI     E,$1 
+            MOV     A,H 
+            ORA     L 
+            RZ       
+            PUSH    B 
+            CALL    $CA34 ; call to LOOKC in the firmware (find instruc. in a table)
+            JC      LBL5 ; if instruction found
+            POP     B 
+            MOV     A,M 
+            INX     H 
+            MOV     H,M 
+            MOV     L,A 
+            JMP     LBL4 
+; instruction found
+LBL5:       MOV     E,M ; store
+            INX     H ; HL + 1
+            MOV     D,M ; to DE
+            CALL    LBL6 ; search  for a paramaeter
+            MOV     A,C 
+            POP     B 
+            MOV     C,A 
+            LXI     H,FINST 
+            PUSH    H 
+            XCHG     ; Exchange DE and HL
+            PCHL     ; jump to HL
+; Find the parameter (only a number in case of memocom)
+LBL6:       CALL    $DDD2 ; Get Character from Line
+;            CALL    $DE0D ; Check if number or upper case
+;            JC      LBL7 ; if Number, jump to LBL7
+;            MVI     A,$2F ; if not, move 47 (48 = "0")
+;            DCR     C ; decrement char position
+;LBL7:       INR     C ; incerement char position
+;            SUI     $30 ; char value - 48 => donne la vraie valeur (ex "1" => 1)
+            DCR     C ; we want to be before the first char of the parameter
+            MOV     A,C ; move char position to A
+            STA     $1B0 ; and store it at $01B0
+LBL8:       CALL    $DDD2 ; Get Character from Line
+            INR     C ; increment char position
+            CPI     $3A ; compare with char ":"
+            RZ       ; if yes, return
+            CPI     $D ; compare with char RETURN
+            RZ       ; if yes, return
+            LDA     $1B0 ; if char in $1B0
+            ORA     A ; <= 127
+            JP      LBL8 ; back to LBL8
+; 
+            MVI     C,$1 ; move 1 to C
+            LXI     D,SDC3 ; adress where we have POP PSW and RET
+            RET      
+; 
+;*************************************
+;* OPEN WHEN SAVE
+;*************************************
+;* Entry:   A:  File Type
+;*          HL: Points to filename
+;* Exit:    HL: Points beyond filename
+;*          DE: Length of name
+;*          BC: Preserved
+;*          A:  Checksum on name
+;*************************************
+WOPEN:      DI       ; Disable interrupt.
+            PUSH    PSW 
+            MVI     A,$8A ; Set mode 0
+            LXI     D,$FE03 ; + config
+            STAX    D ; for DCE.
+            MVI     A,$00 ; Initalize
+            STA     $FE02 ; ORDERS bits.
+            NOP      
+            MVI     A,$03 ; Send
+            LXI     D,$FE02 ; ...
+            STAX    D ; order SAVE (=3).
+WAIT7:      LDA     $FE02 ; Wait
+            ANI     $10 ; for signal
+            JZ      WAIT7 ; from the arduino.
+; Send the name as parameter
+            MVI     A,$01 ; Send
+            LXI     D,$FE02 ; ...
+            STAX    D ; order 1
+            NOP      
+            POP     PSW 
+            PUSH    PSW 
+            PUSH    B 
+            PUSH    D 
+            PUSH    H 
+            CALL    WBYTE ; Send file type.
+            CALL    WNAME ; Send filename.
+            NOP      
+            NOP      
+            NOP      
+            MVI     A,$0E ; Send order
+            STA     $FE02 ; FINSAVE (14)
+            NOP      
+            NOP      
+            MVI     A,$0E ; Wait
+WAIT5:      DCR     A ; a bit for
+            JNZ     WAIT5 ; the Arduino.
+BCL3:       LDA     $FE02 ; Wait for the answer
+            ANI     $20 ; NOMFINI (bit 2)
+            JZ      BCL3 ; from the Arduino.
+            MVI     A,$0E ; Wait
+WAIT10:     DCR     A ; a bit for
+            JNZ     WAIT10 ; the Arduino.
+            POP     H 
+            POP     D 
+            POP     B 
+; End name as parameter
+            MVI     A,$00 ; Initialize
+            LXI     D,$FE02 ; ...
+            STAX    D ; orders bits.
+            NOP      
+            POP     PSW 
+            CALL    WBYTE ; Write file type.
+            JMP     WNAME ; Write filename.
+; 
+;*************************************
+;* WRITE NAME LENGTH
+;*************************************
+;* Entry:   HL: Addr. lenth byte of name
+;* Exit:    HL: Points past string
+;*          DE: Lengtth of name
+;*          BC: Preserved
+;*          A:  Checksum on name
+;*************************************
+WNAME:      MOV     E,M ; Get name legnth.
+            MVI     D,$00 
+            INX     H ; HL to first byte of name.
+            JMP     WBLCK ; Write name lenth.
+; 
+;*************************************
+;* WRITE BLOCK
+;*************************************
+;* Entry:   HL: Startaddress block
+;*            DE: Length block
+;* Exit:    HL: 1st byte after block
+;*          A:  Checksum on block contents
+;*          BCDE: Preserved
+;*************************************
+WBLCK:      PUSH    B 
+            PUSH    D 
+            NOP      
+            CALL    WBLENG ; Write block length + CS.
+            MVI     B,$56 ; IniitiaCheckSum value.
+LBCK1:      MOV     A,D 
+            ORA     E 
+            JZ      LBCK2 ; If all bytes written.
+            DCX     D 
+            MOV     A,M ; Get byte of block.
+            INX     H ; Points to next byte.
+            CALL    WBUC ; Write byte, update CS.
+            JMP     LBCK1 ; Next byte.
+; IF ALL DATA WRITTEN, WRITE C.S. ON BLOCK	
+LBCK2:      MOV     A,B ; Get calculated CS.
+            CALL    WBYTE ; Write CheckSum.
+            NOP      
+            POP     D 
+            POP     B 
+            RET      
+; 
+;*************************************
+;* WRITE BYTE
+;*************************************
+;* Entry:   Byte to be written in A
+;* Exit:    All registers preserved
+;*************************************
+WBYTE:      PUSH    PSW 
+            PUSH    B 
+            PUSH    D 
+            PUSH    H 
+            STA     $FE00 ; Write the byte on FE00.
+            MVI     A,$0E ; Wait
+WAIT:       DCR     A ; a bit for
+            JNZ     WAIT ; the Arduino.
+            MVI     A,$01 ; Send signal ENVOI (1)
+            STA     $FE02 ; to Arduino.
+LWB1:       LDA     $FE02 ; Wait for
+            ANI     $10 ; the signal BIENRECU
+            JZ      LWB1 ; from the Arduino.
+            LDA     $FE02 ; Reset signal
+            DCR     A ; ...
+            STA     $FE02 ; ENVOI.
+            POP     H 
+            POP     D 
+            POP     B 
+            POP     PSW 
+            RET      
+; 
+;*************************************
+;* WRITE BLOCK LENGTH, UPDATE CS
+;*************************************
+;* Entry:   DE: length block
+;* Exit:    DEHL: preserved
+;*************************************
+WBLENG:     MVI     B,$56 ; Init CheckSum.
+            MOV     A,D ; Get highest length byte,
+            CALL    WBUC ; write it, update CS.
+            MOV     A,E ; Get lowest length byte,
+            CALL    WBUC ; write it, update CS.
+            MOV     A,B ; Get Checksum
+            CALL    WBYTE ; Write CS on length
+            RET      
+; 
+;*************************************
+;* WRITE BYTE, UPDATE CS
+;*************************************
+;* Entry:   Byte to be written in A
+;*          Checksum in B
+;* Exit:    new CS in B, A corrupted
+;*          CDEHL preserved
+;*************************************
+WBUC:       CALL    WBYTE ; Write byte.
+            XRA     B 
+            RLC      
+            MOV     B,A ; Update CheckSum.
+            RET      
+; 
+;*************************************
+;* WRITE CLOSE ROUTINE
+;*************************************
+;* Entry:   Length of trailer in C (unusefull)
+;* Exit:    A = 0, BCDEHL preserved
+;*************************************
+WCLOSE:     MVI     A,$0E ; Send FINSAVE signal
+            STA     $FE02 ; to Arduino.
+            EI       ; Enable Interrupt.
+            RET      
+; 
+;*************************************
+;* OPEN WHEN LOAD
+;*************************************
+;* Entry:   HL: Address length byte of name requested
+;*          B: File type byte requested
+;*          C: 00 when reading during run program,
+;*             else FF
+;* Exit:    A: File type byte
+;*          HL: Points to 1st byte of name requested
+;*          DE: Length name requested
+;*          BC: Preserved
+;*************************************
+ROPEN:      DI       ; Disable Interrupt.
+            PUSH    PSW 
+            MVI     A,$8A ; Set mode 0
+            LXI     D,$FE03 ; + config
+            STAX    D ; for DCE.
+            MVI     A,$00 ; Init
+            STA     $FE02 ; FE02.
+            NOP      
+            MVI     A,$04 ; Send LOAD
+            LXI     D,$FE02 ; signal
+            STAX    D ; to Arduino.
+WAIT6:      LDA     $FE02 ; Wait
+            ANI     $10 ; for signal
+            JZ      WAIT6 ; from the arduino.
+; Send the name as parameter
+            MVI     A,$01 ; Send signal
+            LXI     D,$FE02 ; ENVOI
+            STAX    D ; to Arduino.
+            NOP      
+            POP     PSW 
+            PUSH    PSW 
+            PUSH    B 
+            PUSH    D 
+            PUSH    H 
+            PUSH    PSW 
+            MOV     A,B ; copy file type byte to A.
+            CALL    WBYTE ; Send file type.
+            POP     PSW 
+            CALL    WNAME ; Send filename.
+            NOP      
+            NOP      
+            NOP      
+            MVI     A,$0E ; Send order
+            STA     $FE02 ; FINSAVE.
+            NOP      
+            NOP      
+            MVI     A,$0E ; Wait
+WAIT2:      DCR     A ; a bit
+            JNZ     WAIT2 ; for the Arduino.
+BCL4:       LDA     $FE02 ; Wait for signal
+            ANI     $20 ; NOMFINI
+            JZ      BCL4 ; from the Arduino.
+            MVI     A,$0E ; Wait
+WAIT11:     DCR     A ; a bit
+            JNZ     WAIT11 ; for the Arduino.
+            POP     H 
+            POP     D 
+            POP     B 
+; End name as parameter
+            MVI     A,$00 ; Reset signal
+            LXI     D,$FE02 ; ....
+            STAX    D ; FE02.
+            NOP      
+            POP     PSW 
+            PUSH    PSW 
+            CALL    MPT23 ; Init Loading.
+RPN10:      NOP      
+            NOP      
+            NOP      
+            NOP      
+            NOP      
+            POP     PSW 
+            CALL    RHDR ; Read type file.
+            JC      RERRR ; If Error.
+            PUSH    PSW 
+            CALL    $D78A ; Display file type byte.
+            SUB     B 
+            CALL    CMBLK ; Read header, prog name & file type byte.
+            ORA     A ; O if everything is OK.
+RERRR:      JNZ     MPT54 ; If failure.
+            POP     PSW 
+REND:       RET      
+; 
+;*************************************
+;* INITIALAZE LOADING
+;*************************************
+;* Entry:   HL: Points to length byte of name requested
+;* Exit:    DE: length requested name
+;*          HL: Points to 1st byte of name
+;*          AFBC: Preserved
+;*************************************
+MPT23:      MOV     E,M ; Get length requested name
+            MVI     D,$00 ; in DE.
+            INX     H ; HL points to 1st byte name
+            RET      
+;	
+;*************************************
+;* READ FILE HEADER
+;*************************************
+;* Exit:    Interrupt are disabled.
+;*          BCDEHL: Preserved
+;*************************************
+RHDR:       CALL    $D98F ; Disable sound interrupt
+            CALL    RBYTE ; Read file type byte
+            RET      
+; 
+;*************************************
+;* READ + CHECK PROGRAM NAME AND FILE TYPE
+;*************************************
+;* Entry:   A: Evt. difference in file type byte
+;*               read and requested
+;*          HL: Address 1st byte of name requested
+;*          B: Requested file type
+;*          C: 00 when reading during run program,
+;*             else FF
+;*          DE: Length requested
+;* Exit:    A=0: all OK
+;*          A=1: Loading Error 1
+;*          BCDEHL: Preserved
+;*************************************
+CMBLK:      PUSH    B ; SAve file type + RUN flag
+            PUSH    H ; Save addre reqd name
+            MOV     B,A ; Store deviation file type
+MBK10:      PUSH    D ; SAve requ. name length
+            PUSH    H 
+            CALL    NLNG ; read + check program name (CS failure in A)
+            JC      MBK50 ; If reading error
+            ORA     A 
+            JNZ     MBK50 ; If checksum error
+            PUSH    H ; Save length name
+            CALL    $DE1A ; Calcul. difference name length reqd
+            MOV     A,H 
+            ORA     L 
+            MOV     H,A ; Difference in H
+            MOV     L,B ; Difference file type in L
+            POP     D ; Get length
+            MVI     B,$56 ; Init CheckSum
+MBK20:      XTHL     ; Get byte reqd name
+            MOV     A,D 
+            ORA     E ; Length name on tape = 0 ?
+            JZ      MBK30 ; If length = 0 or whole name read
+            DCX     D 
+            CALL    INSC ; Read bytes of name, update CS
+            JC      MBK50 ; If reading error
+            DCR     C 
+            INR     C ; Load during run ?
+            PUSH    PSW ; Save lengtrh name
+            CNZ     $D7EC ; Display program name
+            POP     PSW ; Get byte of name
+            XRA     M ; Compare with name reqd
+            INX     H 
+            XTHL     ; Get "difference flag"
+            ORA     H ; Update it
+            MOV     H,A ; and store it in H
+            JMP     MBK20 ; Next byte
+; If whole name read:
+MBK30:      CALL    RBYTE ; Read CS on name contents
+            JC      MBK50 ; If reading error
+MBEX:       XRA     B ; Check CheckSum
+            POP     H 
+            ORA     L ; Check file type
+            MOV     L,A 
+            POP     D ; Get length req. name
+            MOV     A,D 
+            ORA     E ; No name requested ?
+            JZ      MBK40 ; If load without name
+;            MOV     A,H ; Difference in names ?
+            MVI     A,$00 ; No more check of the name for SD DOS !
+MBK40:      ORA     L ; Take also other checks in account
+MBK45:      POP     H 
+            POP     B 
+            RET      
+MBK50:      POP     H 
+            POP     D 
+            MVI     A,$01 ; Loading error 1
+            JMP     MBK40 
+; 
+;*************************************
+;* READ BLOCK (LENGTH, CONTENT AND CS)
+;*************************************
+;* Entry:   HL: Addr. where tu dump data read
+;*          DE: End free space
+;* Exit:    CY=1: No error
+;*              HL: Next free adress
+;*              BCDE PReserved; AF corrrupted
+;*          CY=0: Loading error
+;*              BCDEHL: Preserved
+;*              A: Type of loading error
+;*************************************
+RBLK:       PUSH    B 
+            PUSH    D 
+            PUSH    H 
+            CALL    $D790 ; Calculate free RAM space
+            XCHG     ; Free RAM in DE
+            CALL    NLNG ; Read blocl length + CS
+            JC      LBK40 ; If loading error 3
+            ORA     A 
+            MVI     A,$00 ; Loading error 0
+            JNZ     LOERR ; If CheckSum error 0
+            PUSH    H ; Save length block
+            DAD     D ; Calculate free RAM
+            POP     D ; Get length block
+            INR     A ; Loading error 1
+            POP     H 
+            PUSH    H ; Restore begin address
+            JC      LOERR ; If loading error 1
+            MVI     B,$56 ; Init CheckSum
+LBK10:      MOV     A,D 
+            ORA     E 
+            JZ      LBK20 ;If whole block read
+            DCX     D 
+            CALL    INSC ; Read next byte, update CS
+            JC      LBK40 ; if loading errro 3
+            MOV     M,A ; Store byte in buffer
+            INX     H 
+            JMP     LBK10 ; Next byte
+; If whole block read
+LBK20:      CALL    RBYTE ; Read CS bllock content
+            JC      LBK40 ; If loading error 3
+            CMP     B ; Check CheckSum
+            MVI     A,$02 ; Loading error 2
+            JNZ     LOERR ; If loading error 2
+            JMP     $C6B4 ; CY=1, return: no error
+; If loading error
+LBK40:      MVI     A,$03 ; Loading error 3
+LOERR:      ORA     A 
+            JMP     $C6B6 ; Return with CY=0: error
+;		
+;*************************************
+;*  READ BYTE
+;*************************************
+;* Entry:   No conditions.	
+;* Exit:	CY=0$ Byte read in A.
+;*	        CY=1$ Some error.	
+;*          BCDEHL preserved.
+;*************************************
+RBYTE:      PUSH    B 
+            PUSH    D 
+            PUSH    H 
+            XRA     A ; Reset A to Zero
+BCL1:       LDA     $FE02 ; Wait
+            ANI     $10 ; the answer ENVOI = 1
+            JZ      BCL1 ; from Arduiino.
+            LDA     $FE02 ; Test if
+            ANI     $80 ; LERROR message
+            JZ      BNOER ; from Arduino.
+            STC      ; Error so CY=1.
+            JMP     BEND ; Go to end.
+BNOER:      LDA     $FE01 ; No error, read the byte in A.
+            MOV     B,A ; Save A in B.
+            LDA     $FE02 ; The answer BIENRECU
+            ORI     $01 ; is sent to
+            STA     $FE02 ; the Arduino.
+;            PUSH    PSW
+;            MVI     A,$1A ; Wait a bit
+;WAIT3:      DCR     A ; for the
+;            JNZ     WAIT3 ; Arduino.
+;            POP     PSW
+BCL2:       LDA     $FE02 ; Wait for the
+            ANI     $10 ; the answer ENVOI = 0
+            JNZ     BCL2 ; from Arduino.
+            LDA     $FE02 ; The answer
+            ANI     $FE ; BIENRECU is
+            STA     $FE02 ; Reset to 0
+;            PUSH    PSW
+;            MVI     A,$1E ; Wait a bit
+;WAIT4:      DCR     A ; for the
+;            JNZ     WAIT4 ; Arduino.
+;RBCL3:      LDA     $FE02 ; Wait for the
+;            ANI     $40 ; the answer ENVOI = 0
+;            JZ      RBCL3 ; from Arduino.
+;            POP     PSW
+            MOV     A,B ; A is restored with the byte read
+BEND:       POP     H 
+            POP     D 
+            POP     B 
+            RET      
+; 
+;*************************************
+;*  READ NAME LENGTH
+;*************************************
+;* Entry:   No conditions.	
+;* Exit:	HL: Length name read
+;*	        A: Result CS check (0 if OK)
+;*          BCDE preserved
+;*          CY=0: OK; CY=1: Out of data
+;*************************************
+NLNG:       PUSH    B 
+            MVI     B,$56 ; Init CheckSum
+            CALL    INSC ; Read highest length byte and update CS
+            MOV     H,A 
+            CNC     INSC ; Read lowest length byte and update CS
+            MOV     L,A 
+            CNC     RBYTE ; Read CheckSum on length
+            PUSH    PSW 
+            SUB     B ; Check CheckSum
+            MOV     B,A 
+            POP     PSW 
+            MOV     A,B 
+            POP     B 
+            RET      
+; 
+;*************************************
+;*  READ BYTE, CALCULATE CHECKSUM
+;*************************************
+;* Entry:   B: CheckSum	
+;* Exit:	A: Byte read
+;*	        B: Updated CheckSum
+;*          CDEHL preserved
+;*************************************
+INSC:       CALL    RBYTE ; Read Byte
+            PUSH    PSW 
+            XRA     B ; Calculate CheckSum
+            RLC      
+            MOV     B,A ; Store new value
+            POP     PSW 
+            RET      
+; 
+;*************************************
+;* READ CLOSE ROUTINE
+;*************************************
+;* Exit:    All register preserved
+;*************************************
+RCLOS:      EI       ; Enable Interrupt
+            RET      
+; 
+;*************************************
+;* FAILURE DURING  ROPEN
+;*************************************
+;*
+;*************************************
+MPT54:      DCR     B 
+            INR     B 
+            JNZ     RPN20 ; if file type byte <> 0: run error
+            POP     PSW 
+            RET      
+; 
+;*************************************
+;* FAILURE DURING  ROPEN
+;*************************************
+;*
+;*************************************
+RPN20:      DCR     C 
+            INR     C ; Load during program ?
+            CNZ     $DD5E ; Print car. ret if not
+            JMP     REND ; Back to ROPEN
+
+; 
+;*************************************
+;* ROUTINE INIT: initialize the
+;* command intrepretation
+;*************************************
+;* Exit:
+;*************************************
+; 
+INIT:       PUSH    PSW 
+            PUSH    B 
+            PUSH    D 
+            PUSH    H 
+            LXI     H,INTBL ; Command Table
+            SHLD    $297 
+            LXI     H,$296 
+            MVI     A,$2 
+            ORA     M 
+            MOV     M,A 
+            XRA     A 
+            STA     $11F 
+            STA     $2C4 
+            CALL    NONERR 
+            LXI     H,$DDB4 
+            SHLD    $2E4 
+            MVI     A,$C3 
+            STA     $2E3 
+            CALL    SDC 
+            JMP     $C14D ; Do POP H D B and RET
+; 
+;*************************************
+;* ROUTINE SDC: redirect the vectors
+;* to the SD card routines
+;*************************************
+;* Exit:    All register (not A) preserved
+;*************************************
+SDC:        PUSH    PSW 
+SDC2:       PUSH    D 
+            PUSH    H 
+            PUSH    B 
+            LXI     D,BTBLV ; Begin DATA
+            LXI     H,ETBLV ; End of DATA
+            LXI     B,$2C5 
+            CALL    $DE4F ; Routine for copying Blok
+            MVI     A,$00 ; ORDERS init
+            STA     $FE02 ; to Zero.
+            POP     B 
+            POP     H 
+            POP     D 
+SDC3:       POP     PSW 
+            RET      
+; 
+; DATAs for replacing Vectors
+; 
+BTBLV:      JMP     WOPEN ; WOPEN
+            JMP     WBLCK ; WBLK
+            JMP     WCLOSE ; WCLOSE
+            JMP     ROPEN ; ROPEN
+            JMP     RBLK ; RBLK
+            JMP     RCLOS ; RCLOSE
+            JMP     CMBLK ; CMBLK
+            RET      ; RESET
+            NOP      ; DOUTC
+            NOP      ; DINC
+            RET      
+            NOP      ; TAPSL
+            NOP      ; TAPSD
+            JMP     DINC ; DINC
+ETBLV:      NOP      
+; 
+;*************************************
+;* COMMAND SDC: redirect the vectors
+;* to the SD card routines
+;* for DIRECT COMMAND
+;*************************************
+;* Exit:    All register (not A) preserved
+;*************************************
+CSDC:       PUSH    PSW 
+;LDA     $1B0 En cas d'argument (dans 1B0) !
+;ORA     A
+;JP      CSD1
+;INR     A
+;CSD1:       ANI     $3
+;STA     $11F
+            JMP     SDC2 
+; 
+;*************************************
+;* ROUTINE TAP: redirect the vectors
+;* to the  Cassettes routines
+;*************************************
+;* Exit:    All register (not A) preserved
+;*************************************
+TAP:        PUSH    PSW 
+TAP2:       PUSH    D 
+            PUSH    H 
+            PUSH    B 
+            LHLD    $2E4 
+            PUSH    H 
+            CALL    $D795 ; original routine initalizing vectors
+            POP     H 
+            SHLD    $2E4 
+            MVI     A,$C3 
+            STA     $2E3 
+            LXI     H,DINC 
+            SHLD    $2E1 
+            POP     B 
+            POP     H 
+            POP     D 
+            POP     PSW 
+            RET      
+; 
+;*************************************
+;* COMMAND TAP: redirect the vectors
+;* to the  Cassettes routines
+;* FOR DIRECT COMMAND
+;*************************************
+;* Exit:    All register (not A) preserved
+;*************************************
+; 
+CTAP:       PUSH    PSW 
+;LDA     $1B0 En cas d'argument (dans 1B0) !
+;ORA     A
+;JP      CTP1
+;MVI     A,$1
+;CTP1:       ANI     $3
+;RLC
+;RLC
+;RLC
+;RLC
+;STA     $13D
+            JMP     TAP2 
+;*************************************
+;* ROUTINE DIR: Display the DIRectory
+;* of the SD-CArd
+;*************************************
+;* Exit:    All register preserved
+;*************************************
+CLS:        PUSH    PSW 
+            MVI     A,$0FF ; Mode 0
+            RST     5 
+            DB      $18 
+            MVI     A,$0C ; Print chr$12
+            RST     5 
+            DB      $03 
+            POP     PSW 
+            RET      
+;*************************************
+;* ROUTINE DIR: Display the DIRectory
+;* of the SD-CArd
+;*************************************
+;* Exit:    All register preserved
+;*************************************
+; 
+ABOUT:      DI       
+            PUSH    PSW 
+            PUSH    B 
+            PUSH    D 
+            PUSH    H 
+            MVI     A,$8A ; Set mode 0
+            STA     $FE03 ; + config for DCE
+            MVI     A,$00 ; Init
+            STA     $FE02 ; FE02.
+            NOP      
+            MVI     A,$09 ; Send ABOUT
+            STA     $FE02 ; signal to arduino
+            JMP     WDIR1 
+;*************************************
+;* ROUTINE DIR: Display the DIRectory
+;* of the SD-CArd
+;*************************************
+;* Exit:    All register preserved
+;*************************************
+; 
+DIR:        DI       
+            PUSH    PSW 
+            PUSH    B 
+            PUSH    D 
+            PUSH    H 
+            MVI     A,$8A ; Set mode 0
+            STA     $FE03 ; + config for DCE
+            MVI     A,$00 ; Init
+            STA     $FE02 ; FE02.
+            NOP      
+            MVI     A,$01 ; Send DIR
+            STA     $FE02 ; signal to arduino
+WDIR1:      LDA     $FE02 ; Wait
+            ANI     $10 ; for signal
+            JZ      WDIR1 ; from the arduino.
+            MVI     A,$00 ; Init dialog
+            STA     $FE02 ; channel at zero
+            MVI     A,$0E ; Wait
+WDIR2:      DCR     A ; a bit
+            JNZ     WDIR2 ; for the Arduino.
+CDIR1:      CALL    RBYTE ; read the byte
+            CALL    OUTC ; display the byte
+            LDA     $FE02 ; Check if
+            ANI     $20 ; FINLIGNE
+            JZ      CDIR1 ; if not, continue to read byte
+            CALL    CRLF ; if yes, output a CRLF
+            CALL    FGETC ; a Key pressed ?
+            JZ      CDIR2 ; No, so we continue
+            CALL    WSPACE ; yes, we wait for SPACEBAR
+;CDIR2:      MVI     A,$0E ; Wait
+;CDIR4:      DCR     A ; a bit
+;            JNZ     CDIR4 ; for the Arduino.
+CDIR2:      LDA     $FE02 ; check if
+            ANI     $40 ; Message ENVOIFIN
+            JZ      CDIR1 ; if NO, read the next byte
+CDIR3:      POP     H 
+            POP     D 
+            POP     B 
+            POP     PSW 
+            EI       
+            RET      
+;*************************************
+;* ROUTINE DELETE: Delete a file
+;* on the SD-CArd (commande 2)
+;*************************************
+;* Exit:    All register preserved
+;*************************************
+; 
+DEL:        PUSH    PSW 
+;           CALL    WCONF ; Confirmation Routine
+;           JC      DELE ; if no confirmation (Carry = 1), stop
+            MVI     A,$02 ; 2 = DELETE
+            CALL    COMMAND ; call COMMAND routine
+DELE:       POP     PSW 
+            RET      
+;*************************************
+;* ROUTINE INDXAUTO: Display or change
+;* the content of one of the AUTO INDEX
+;* file
+;*************************************
+;* Exit:    All register preserved
+;*************************************
+; 
+INDXA:      PUSH    PSW 
+            MVI     A,$05 ; 5 = INDXAUTO
+            CALL    COMMAND ; call COMMAND routine
+            POP     PSW 
+            RET      
+;*************************************
+;* ROUTINE COPY: Copy a file
+;* on the SD-CArd (commande 6)
+;*************************************
+;* Exit:    All register preserved
+;*************************************
+; 
+COPY:       PUSH    PSW 
+            MVI     A,$06 ; 6 = COPY
+            CALL    COMMAND ; call COMMAND routine
+            POP     PSW 
+            RET      
+;*************************************
+;* ROUTINE RENAME: Rename a file
+;* on the SD-CArd (commande 7)
+;*************************************
+;* Exit:    All register preserved
+;*************************************
+; 
+RENAME:     PUSH    PSW 
+            MVI     A,$07 ; 7 = RENAME
+            CALL    COMMAND ; call COMMAND routine
+            POP     PSW 
+            RET      
+;*************************************
+;* ROUTINE COMMAND: routine for every
+;* command using a parameter and
+;* returning a message
+;*************************************
+;* Entry: A with the number of the command
+;* Exit: All register preserved
+;*************************************
+; 
+COMMAND:    DI       
+            PUSH    PSW 
+            PUSH    B 
+            PUSH    D 
+            PUSH    H 
+            PUSH    PSW ; Save A
+            MVI     A,$8A ; Set mode 0
+            STA     $FE03 ; + config for DCE
+            MVI     A,$00 ; Init
+            STA     $FE02 ; FE02.
+            NOP      
+            POP     PSW ; Restore A with the number to send to FE02
+            STA     $FE02 ; signal to arduino
+WCOM1:      LDA     $FE02 ; Wait
+            ANI     $10 ; for signal
+            JZ      WCOM1 ; from the arduino.
+            CALL    SENDPAR ; send the name of the file as parameter
+; 
+            MVI     A,$00 ; Set ORDER at zero
+            STA     $FE02 ; so we can go to the next step.
+; 
+WCOM3:      LDA     $FE02 ; Wait for signal
+            ANI     $40 ; ENVOIMESSAGE
+            JZ      WCOM3 ; from the Arduino.
+            CALL    CRLF ; output a CRLF before the message
+            CALL    RECVMES ; Receive the message from the arduino
+            MVI     A,$00 ; Init dialog
+            STA     $FE02 ; channel at zero
+            MVI     A,$0E ; Wait
+WCOM2:      DCR     A ; a bit
+            JNZ     WCOM2 ; for the Arduino.
+            POP     H 
+            POP     D 
+            POP     B 
+            POP     PSW 
+            EI       
+            RET      
+;*************************************
+;* ROUTINE SENDPAR: Send a paramater
+;* after the command
+;*************************************
+;* Exit:    All register preserved
+;*************************************
+; 
+SENDPAR:    PUSH    PSW 
+            PUSH    B 
+            PUSH    D 
+            PUSH    H 
+            LDA     $01B0 ; position of the first car of the parameter
+            MOV     C,A ; store position in C
+            MVI     A,$01 ; Send signal
+            LXI     D,$FE02 ; ENVOI
+            STAX    D ; to Arduino.
+SPG:        CALL    $DDD2 ; get char  but no space or tab
+            CPI     $0D ; If "CR"
+            JZ      SPE ; we stop the read of char
+            CALL    WBYTE ; send the char to the arduino
+            INR     C ; go to the
+            JMP     SPG ; next char
+SPE:        MVI     A,$0E ; Send order
+            STA     $FE02 ; FINPAR.
+            MVI     A,$0E ; Wait
+SPW1:       DCR     A ; a bit
+            JNZ     SPW1 ; for the Arduino.
+SPB1:       LDA     $FE02 ; Wait for signal
+            ANI     $20 ; PARFINI
+            JZ      SPB1 ; from the Arduino.
+            MVI     A,$0E ; Wait
+SPW2:       DCR     A ; a bit
+            JNZ     SPW2 ; for the Arduino.
+            POP     H 
+            POP     D 
+            POP     B 
+            POP     PSW 
+            RET      
+;*************************************
+;* ROUTINE WCCHAR: wait if a key.       NOT USED NOW !!!
+;* is pressed
+;*************************************
+;* Entry: none
+;* Exit:  CY=1: Break pressed, 0 in A
+;*        CY=0: Char in A
+;*        BCDEHL preserved
+;*************************************
+; 
+
+WCCHAR:     CALL    FGETC ; input routine
+            JZ      WCCHAR ; No key pressed, so back to FGETC
+            JC      WCCHAR1 ; Break, so move 0 to A
+            JMP     WCCHAR2 ; a key is pressed, so return
+WCCHAR1:    MVI     A,$0 ; move 0 to A
+WCCHAR2:    RET      
+;*************************************
+;* ROUTINE WCONF: routine confirming    NOT USED NOW !!!
+;* the commaznd
+;*************************************
+;* Entry: none
+;* Exit:  CY=0: confirmation
+;*        CY=1: NO confirmation
+;*        BCDEHL preserved
+;*************************************
+; 
+WCONF:      PUSH    B 
+            PUSH    D 
+            PUSH    H 
+            CALL    $DAFF ; routine to display message
+            DW      WMESS1 ; message for the routine
+            CALL    WCCHAR ; routinbe waiting a key pressed
+            CPI     $43 ; is "C" in A ?
+            JNZ     WCONFS ; A is not "C"
+            ORA     A ; A is "C" so Carry set to 0
+            JMP     WCONFE ; and return
+WCONFS:     STC      ; if not "C" set Carry to 1
+WCONFE:     POP     H 
+            POP     D 
+            POP     B 
+            RET      
+; 
+WMESS1:     DB      $0D 
+            DB      "Continue ? Type C if yes," 
+            DB      "other key if not" 
+            DB      $00 
+;*************************************
+;* ROUTINE RECVMES: receve a message
+;* on one line from the arduino
+;*************************************
+;* Exit:    All register preserved
+;*************************************
+; 
+RECVMES:    PUSH    PSW 
+            PUSH    B 
+            PUSH    D 
+            PUSH    H 
+CRMS1:      CALL    RBYTE ; read the byte
+            CALL    OUTC ; display the byte
+            LDA     $FE02 ; Check if
+            ANI     $20 ; FINLIGNE
+            JZ      CRMS1 ; if not, continue to read byte
+            CALL    CRLF ; if yes, output a CRLF
+            POP     H 
+            POP     D 
+            POP     B 
+            POP     PSW 
+            RET      
+; 
+;*************************************
+;* ROUTINE ONERR: Initialize ON ERROR
+;*************************************
+;* Exit: Register H preserved
+;*************************************
+ONERR:      PUSH    H 
+            INX     H 
+            INX     H 
+            INX     H 
+            SHLD    $120 ; save area for restart on Error
+            POP     H 
+            RET      
+
+
+;*************************************
+;* ROUTINE TESTMEM: programme de test
+;* de la mémoire de Bruno Vivien
+;*************************************
+;* Exit:    All register preserved
+;*************************************
+; 
+TSTMEM:     PUSH    PSW 
+            PUSH    B 
+            PUSH    D 
+            PUSH    H 
+            DI       
+            MVI     B,$0 
+TMSUIV:     LXI     H,ADFIN 
+            XCHG     
+TMECR:      LXI     H,ADDEB 
+TMECR1:     MOV     M,B 
+            CALL    TMTESTFI 
+            INX     H 
+            JNZ     TMECR1 
+            LXI     H,ADDEB 
+TMCTRL:     MOV     A,B 
+            XRA     M 
+            JNZ     TMERREUR 
+            CALL    TMTESTFI 
+            INX     H 
+            JNZ     TMCTRL 
+            INR     B 
+            MVI     A,$FF 
+            XRA     B 
+            JNZ     TMSUIV 
+            CALL    TMCLS 
+            LXI     H,TMOK 
+            CALL    $DB32 
+TMFIN:      POP     H 
+            POP     D 
+            POP     B 
+            POP     PSW 
+            EI       
+            RET      
+TMERREUR:   CALL    TMCLS 
+            PUSH    H 
+            LXI     H,TMPB 
+            CALL    $DB32 
+            POP     H 
+            MVI     A,$0 
+            MVI     B,0 
+            MOV     C,H 
+            MOV     D,L 
+            RST     4 
+            DB      $12 
+            CALL    $C653 
+            LXI     H,$E3 
+            CALL    $DB32 
+            JMP     TMFIN 
+TMCLS:      MVI     A,$FF 
+            RST     5 
+            DB      $18 
+            MVI     A,$0C 
+            CALL    $D695 
+            MVI     A,$0D 
+            CALL    $D695 
+            RET      
+TMTESTFI:   MOV     A,D 
+            XRA     H 
+            RNZ      
+            MOV     A,E 
+            XRA     L 
+            RET      
+TMOK:       DB      2 
+            DB      "OK" 
+TMPB:       DB      13 
+            DB      "PB ADRESSE : " 
+            RET      
+; 
+;*************************************
+;* ROUTINE NONERR: Deactiviate ON ERROR
+;* abd back to normal mgt.
+;*************************************
+;* Exit: Register H preserved
+;*************************************
+NONERR:     PUSH    H 
+            LXI     H,$0 
+            SHLD    $120 ; save area for restart on Error
+            POP     H 
+            RET      
+; 
+; INSTRUCTIONS TABLE
+; 
+INTBL:      DB      3 
+            DB      "CLS" 
+            DW      CLS 
+; 
+            DB      3 
+            DB      "SDC" 
+            DW      CSDC 
+; 
+            DB      3 
+            DB      "TAP" 
+            DW      CTAP 
+; 
+            DB      3 
+            DB      "DIR" 
+            DW      DIR 
+; 
+            DB      6 
+            DB      "DELETE" 
+            DW      DEL 
+; 
+            DB      8 
+            DB      "INDXAUTO" 
+            DW      INDXA 
+; 
+            DB      4 
+            DB      "COPY" 
+            DW      COPY 
+; 
+            DB      6 
+            DB      "RENAME" 
+            DW      RENAME 
+; 
+            DB      7 
+            DB      "TESTMEM" 
+            DW      TSTMEM 
+; 
+            DB      8 
+            DB      "ABOUTDOS" 
+            DW      ABOUT 
+; 
+            NOP      
+            NOP      
+            NOP      
+END:        END      
